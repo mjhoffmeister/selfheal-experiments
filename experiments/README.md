@@ -47,63 +47,94 @@ plausible real-world problem, not a contrived one.
 
 ## Inject scenario
 
-`scripts/inject-dep-conflict.{ps1,sh}` performs four coupled mutations on a
-fresh branch off `main`:
+`scripts/inject.{ps1,sh}` performs four coupled mutations on a fresh branch
+off `main`:
 
 1. `src/Web/package.json` — bumps `engines.node` from `18.x` to `22.x`.
-2. `src/Web/package.json` — adds `bcrypt@5.0.1` as a direct dependency.
-   bcrypt 5.0.1 has no prebuilt binaries for Node 22, so `npm ci` falls
-   through to a node-gyp source build that fails.
-3. `.github/workflows/ci.yml` — bumps `setup-node` `node-version` from
+2. `.github/workflows/ci.yml` — bumps `setup-node` `node-version` from
    `18.20.4` to `22.11.0`.
-4. `src/Web/.npmrc` — written with `engine-strict=true` (defence-in-depth;
-   not the primary failure trigger now).
+3. `src/Web/crypto-helper.js` — new file using `crypto.createCipher`, which
+   was deprecated in Node 10 and **hard-removed in Node 22**.
+4. `src/Web/crypto-helper.test.js` — exercises the helper. `require()` of
+   the helper throws `TypeError: crypto.createCipher is not a function`
+   when jest loads the test on Node 22, failing the suite.
 
-The script also regenerates `package-lock.json` via `npm install
---package-lock-only --ignore-scripts` so the lock matches the new
-`package.json` without invoking native postinstall on the local box (which
-would defeat the purpose).
+The helper is written to look like a plausibly-real legacy session-token
+signer (with a comment acknowledging the API is deprecated and kept for
+back-compat). The agent has to actually understand what
+`crypto.createCipher` is, not just recognise an obviously contrived stub.
 
 ### Iteration history
 
-**v1 (deleted):** bare `engines.node` bump + `engine-strict=true`. Tested
-empirically on 2026-04-23 against PR #1 — CI passed in 13s. Modern packages
-declare permissive `engines.node`, so nothing fired. Documented and
-iterated ONCE per the anti-bias rule (rule #1 forbids per-trial tuning;
-this was a pre-trial infra fix, not tuning between trials).
+Two pre-trial inject hypotheses failed to break CI. Documented here in full
+because **the failure to construct a "realistic Node-bump CI break" on
+Ubuntu runners is itself a finding** worth recording.
 
-**v2 (current):** above. Honest about the scenario class drift: this is
-now "native-module install fails after Node major bump" rather than
-"transitive engines conflict". Both are realistic real-world failure
-modes a Node service hits when bumping Node majors; the test of agent
-capability is comparable.
+**v1 (deleted):** bare `engines.node 18.x → 22.x` bump +
+`.npmrc engine-strict=true`. Tested empirically on 2026-04-23 against PR #1
+— CI passed in 13s. Modern Node packages declare permissive `engines.node`
+(typically `>=14`), so a 22-bump satisfies them all and `engine-strict`
+has nothing to enforce.
 
-### Alternatives still on the table (not chosen)
+**v2 (deleted):** v1 plus add `bcrypt@5.0.1` as a direct dependency.
+Hypothesis: an older bcrypt has no prebuilt binaries for Node 22 and
+`node-gyp` will fail. Tested empirically on 2026-04-23 against PR #2 —
+CI passed in 17s. bcrypt either has back-published prebuilds or built
+cleanly from source against the build tools that ship with
+`ubuntu-latest`. Either way, not the failure we wanted.
 
-If v2 also fails to produce a CI failure, or if results are uninteresting,
-these remain available:
+**v3 (current):** drop the dep-conflict framing entirely. Switch to
+"Node major bump removes an API our app code uses" — a different scenario
+class but a *very* real one. `crypto.createCipher` is the canonical
+example: silently deprecated for years, then hard-removed in Node 22.
+Verified locally on Node 22.14.0: `crypto.createCipher('aes-192-cbc','x')`
+throws `TypeError: c.createCipher is not a function`. The injected test
+file `require()`s the helper, so jest fails at module load.
+
+### Honest meta-finding
+
+The original "transitive engines conflict" framing is **harder to
+manufacture than it looks** in 2026's npm ecosystem:
+
+- Most packages declare permissive `engines.node`.
+- Native modules with serious Node-version coupling either have
+  back-published prebuilds (bcrypt) or build cleanly against runner-provided
+  build tools.
+- `npm ci`'s engine-strict only fires on declared mismatches, which are
+  rare in modern transitive trees.
+
+If you want to test agent ability to fix a *transitive dep conflict*
+specifically, you'll need to either (a) hand-craft a fixture dep with a
+deliberately tight `engines.node` upper bound, or (b) target a Windows
+runner where node-gyp fallbacks fail more readily. Neither was chosen here
+because both drift from "realistic real-world failure."
+
+### Alternatives still on the table
+
+If v3 also fails (or its results are uninteresting), these remain
+available, in rough order of preference:
 
 | Variant | Why considered | Why not (yet) chosen |
 |---|---|---|
-| Pin `eslint@7.x` as a direct dep | Older ESLint has narrower Node support | ESLint isn't a runtime dep of the fixture; would feel transparently bolted-on. |
-| Use npm `overrides` to pin a transitive to an old version | Cleanest "transitive surfaces" story | Hard to pick a transitive whose old version actually breaks on Node 22 without local trial-and-error. |
-| Add a test that uses `crypto.createCipher` (removed in Node 22) | Reliable runtime failure | That's a fixture bug, not a dependency conflict — wrong scenario class. |
-| Pin `node-sass@4.x` | Famously Node-version-coupled real-world legacy dep | Same class as bcrypt (native module); pick one. |
+| `node-sass@4.14.1` | Famously Node-version-coupled legacy dep | Slow installs; same class as the failed bcrypt attempt. |
+| Move CI to `windows-latest` + retry bcrypt | Build-tools fallback is less robust on Windows | 5× CI minute multiplier; less typical of Node deployments. |
+| Hand-crafted fixture sub-package with strict `engines.node` upper bound | Cleanest "transitive surfaces" story | Most contrived option. |
+| Pin `eslint@7.x` as direct dev-dep | Older ESLint narrows Node support | Not a runtime dep; would feel bolted-on. |
 
 ### Expected agent strategies
 
 The trial log records `agent_proposed_strategy` as one of:
 
-- **bump-bcrypt** — bumps bcrypt to a version with Node-22 prebuilds (the
-  obviously-correct fix; bcrypt 5.1.1+).
-- **swap-bcrypt** — replaces bcrypt with `bcryptjs` (pure-JS, no native
-  build). Reasonable but a wider change.
-- **overrides** — adds `overrides` in `package.json` to pin a transitive
-  forward (less applicable now that the failure is a direct dep, but
-  possible if the agent misreads the failure).
-- **rollback** — reverts the Node bump or removes bcrypt entirely (counts
-  as `wrong-but-passing` per the rubric below — makes CI green by
-  abandoning the intended change).
+- **modernize-cipher** — replaces `createCipher` with the modern
+  `createCipheriv` + a derived key (e.g. via `scrypt`/`pbkdf2`). The
+  obviously-correct fix; preserves intent of the helper.
+- **swap-library** — replaces the helper with a third-party crypto lib
+  (jose, node-jose, etc.). Reasonable but a wider change.
+- **delete-helper** — removes the helper file and its test entirely
+  (counts as `wrong-but-passing` — makes CI green by abandoning the new
+  code rather than fixing it).
+- **rollback** — reverts the Node bump (counts as `wrong-but-passing` —
+  same reason).
 - **none** — no strategy proposed; PR is empty or doesn't address the issue.
 
 ## Outcome rubric
@@ -122,7 +153,7 @@ For each trial:
 
 1. Confirm `main` is green (CI passes the baseline).
 2. Confirm working tree is clean.
-3. Run `pwsh scripts/inject-dep-conflict.ps1` (or the bash equivalent).
+3. Run `pwsh scripts/inject.ps1` (or the bash equivalent).
    Capture the resulting PR URL.
 4. Wait for CI to fail on the inject PR. Confirm `self-heal.yml` opens a
    tracking issue and assigns `copilot-swe-agent`.
@@ -145,7 +176,7 @@ One JSON object per line; append-only.
   "fixture_sha": "abc1234",
   "node_from": "18",
   "node_to": "22",
-  "injected_constraint": "engines.node 18.x -> 22.x + .npmrc engine-strict=true",
+  "injected_constraint": "engines.node 18.x -> 22.x + crypto.createCipher in src/Web/crypto-helper.js",
   "context": "pull_request",
   "instructions_present": false,
   "agent_session_started": true,
