@@ -156,14 +156,54 @@ For each trial:
 3. Run `pwsh scripts/inject.ps1` (or the bash equivalent).
    Capture the resulting PR URL.
 4. Wait for CI to fail on the inject PR. Confirm `self-heal.yml` opens a
-   tracking issue and assigns `copilot-swe-agent`.
-5. Watch for the agent's fix PR (it will open off `main`, **not** off the
+   tracking issue (look for the `self-heal` label).
+5. **Manually assign `copilot-swe-agent` to the tracking issue.** This is
+   a deliberate human-in-the-loop step — the workflow cannot do it (see
+   "Discovered limitation" below). Use either the issue UI sidebar or
+   `gh issue edit <N> --add-assignee copilot-swe-agent` from a shell
+   authenticated with a user token.
+6. Watch for the agent's fix PR (it will open off `main`, **not** off the
    inject branch — see `/memories/selfheal-strategic-learnings.md`).
-6. When the agent's PR settles (CI green or the agent stops responding for
+7. When the agent's PR settles (CI green or the agent stops responding for
    ~30 min), record outcome.
-7. Append one JSON object to `trials.jsonl`. Schema below.
-8. Close both PRs without merging. Close the tracking issue. Delete both
+8. Append one JSON object to `trials.jsonl`. Schema below.
+9. Close both PRs without merging. Close the tracking issue. Delete both
    branches. Reset `main` to baseline-green state.
+
+## Discovered limitation: agent assignment requires user identity
+
+Confirmed empirically 2026-04-23 across multiple attempts:
+
+- A GitHub App installation token (even with `issues: write`) **cannot**
+  assign `copilot-swe-agent` to an issue.
+  - GraphQL `replaceActorsForAssignable` (used by `gh issue edit
+    --add-assignee`) fails hard with `"target repository is not
+    writable"`.
+  - REST `POST /repos/{o}/{r}/issues/{n}/assignees` returns 201 success
+    but **silently drops** the bot from the assignees list.
+- A user identity (browser click, or `gh issue edit` with a user GH_TOKEN)
+  works fine. Inference: assigning the cloud agent requires a user tied
+  to a Copilot subscription, not just `issues:write`.
+
+This means full end-to-end autonomy (failure → issue → agent dispatch)
+is **not achievable from a workflow** without using a fine-grained PAT,
+which the harness rules forbid.
+
+**Decision:** keep the no-PATs rule. Leave assignment as a manual step
+between workflow and agent. This actually cleanly separates the two
+things being measured:
+
+- **Mechanism (the responder):** does it reliably extract the failure,
+  open a useful tracking issue, and produce a clean dedupe key?
+  Workflow's job. Tested by simply running CI and watching issues.
+- **Capability (the agent):** given a useful tracking issue, can it
+  produce a working fix? Agent's job. Tested per trial after the human
+  triggers it.
+
+If a future iteration cares about the autonomy gap, the relevant
+decision is whether to introduce a PAT (and document it as a deliberate
+deviation), not how to coax the App token into doing what GitHub
+explicitly prevents.
 
 ## Trial log schema (`trials.jsonl`)
 

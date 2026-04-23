@@ -4,7 +4,6 @@
 #   1. classify              — extract failed job name, last 50 log lines, dedupe key
 #   2. open-or-update-issue  — render template, dedupe by (workflow, branch, failed_job),
 #                              create issue or comment on existing
-#   3. assign-copilot        — mint App token, assign copilot-swe-agent to the issue
 #
 # Loop-prevention: skip when the upstream run was triggered by the cloud agent itself.
 # Permissions: minimum viable per job. No PATs anywhere.
@@ -13,9 +12,17 @@
 #   - transient detection / retry-once
 #   - circuit breaker / attempt labels
 #   - source-PR lookup + PR-comment dispatch path
-# Per /experiments/README.md, only ONE dispatch path (issue assignment) is exercised
-# in this experiment harness because empirical testing showed it is the only
-# reliable trigger for the cloud agent.
+#
+# Agent assignment is intentionally MANUAL (see /experiments/README.md
+# "Discovered limitation: agent assignment requires user identity").
+# Empirical finding 2026-04-23: a GitHub App installation token cannot
+# assign `copilot-swe-agent` to an issue via either GraphQL
+# (`replaceActorsForAssignable` → "target repository is not writable")
+# or REST (`POST /repos/{}/issues/{}/assignees` → returns 201 but
+# silently drops the bot from the assignees list). Manual assignment
+# with a user identity (browser click or `gh issue edit` with a user
+# token) works. Per the no-PATs rule, the harness stops at issue
+# creation and the human triggers the agent.
 
 name: Self-heal
 
@@ -195,74 +202,9 @@ jobs:
               --label self-heal)"
             num="${url##*/}"
             echo "issue_number=$num" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tracking issue #$num created. Manually assign \`copilot-swe-agent\` to start the agent (App tokens cannot assign the bot)."
           else
             gh issue comment "$existing" --body-file "$BODY_PATH"
             echo "issue_number=$existing" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tracking issue #$existing updated."
           fi
-
-  assign-copilot:
-    name: assign Copilot cloud agent
-    needs: [classify, open-or-update-issue]
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions: {}
-    steps:
-      # Mint a short-lived (~1h) GitHub App installation token at runtime.
-      # Inputs:
-      #   vars.APP_ID             — public GitHub App ID (a repo/org variable, NOT a secret)
-      #   secrets.APP_PRIVATE_KEY — the App's RSA private key (.pem contents)
-      #
-      # App permissions required:
-      #   - issues: write   (assign agent to tracking issue)
-      #   - metadata: read  (mandatory for any App)
-      #
-      # We DO NOT keep a long-lived fallback secret: installation tokens expire
-      # hourly, so any "stored token" would have to be a PAT, which violates
-      # the no-PATs rule.
-      - name: Mint App installation token
-        id: app_token
-        uses: actions/create-github-app-token@67e27a7eb7db372a1c61a7f9bdab8699e9ee57f7 # v1.11.1
-        with:
-          app-id: ${{ vars.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-
-      - name: Assign agent to tracking issue
-        env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ needs.open-or-update-issue.outputs.issue_number }}
-        run: |
-          set -euo pipefail
-          # No checkout in this job (it has zero filesystem permissions), so
-          # gh's git-based repo auto-detection fails. GH_REPO tells gh which
-          # repo to act on without needing a working tree.
-          #
-          # The Copilot cloud agent's *display* login is "Copilot" but its
-          # *actual* assignee handle is the bot login "copilot-swe-agent" —
-          # passing "Copilot" to --add-assignee returns "'Copilot' not found".
-          #
-          # Empirical finding (see /memories/selfheal-strategic-learnings.md):
-          # issue assignment is the ONLY reliable trigger for the cloud agent.
-          # PR-assign, PR-comment @-mention, and issue-comment @-mention all
-          # failed to start a session in testing.
-          #
-          # IMPORTANT: do NOT use `gh issue edit --add-assignee` here — it
-          # uses the GraphQL `replaceActorsForAssignable` mutation which an
-          # App installation token cannot authorize for the copilot-swe-agent
-          # bot ("target repository is not writable"). Use the REST endpoint
-          # POST /repos/{owner}/{repo}/issues/{n}/assignees instead, which
-          # accepts the App token with `issues: write`.
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${GH_REPO}/issues/${ISSUE_NUMBER}/assignees" \
-            -f "assignees[]=copilot-swe-agent"
-          # Verify the bot actually landed in the assignees list — the REST
-          # endpoint silently ignores assignees the caller can't add.
-          assigned=$(gh api "/repos/${GH_REPO}/issues/${ISSUE_NUMBER}" \
-            --jq '[.assignees[].login] | join(",")')
-          echo "Assignees after add: ${assigned}"
-          echo "${assigned}" | grep -q 'copilot-swe-agent' || {
-            echo "::error::copilot-swe-agent was silently dropped from assignees"
-            exit 1
-          }
