@@ -28,8 +28,12 @@ function signToken(payload, passphrase) {
 }
 
 function verifyToken(token, payload, passphrase) {
-  const expected = signToken(payload, passphrase);
-  return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+  try {
+    const expected = signToken(payload, passphrase);
+    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+  } catch {
+    return false;
+  }
 }
 
 module.exports = { signToken, verifyToken };
