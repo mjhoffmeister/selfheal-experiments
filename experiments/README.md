@@ -245,5 +245,99 @@ One JSON object per line; append-only.
 
 ## Results
 
-> Empty until at least N=5 trials have been recorded.
-> Per anti-bias rule #3: do not write this section pre-emptively.
+### Batch 1 — N=5, no per-repo guidance, Node 22 + `crypto.createCipher` fixture
+
+Trials T001–T005 were run consecutively on 2026-04-23. All five completed
+without per-repo `copilot-instructions.md` guidance.
+
+#### Outcomes
+
+| trial | strategy | outcome | wallclock | kept Node bump |
+|---|---|---|---:|:---:|
+| T001 | modernize-cipher | fixed | 7 min | ✓ |
+| T002 | modernize-cipher | fixed | 9 min | ✓ |
+| T003 | swap-primitive (HMAC) | fixed | 8 min | ✓ |
+| T004 | swap-primitive (HMAC) | fixed | 9 min | ✓ |
+| T005 | modernize-cipher | fixed | 6 min | ✓ |
+
+**5/5 fixed. 0/5 wrong-but-passing. 0/5 no-op. 0/5 error.**
+
+Median wallclock: ~8 min (inject PR opened → agent PR ready_for_review).
+
+#### Strategy distribution
+
+- **modernize-cipher** (3/5): replace `createCipher` with `createCipheriv`
+  using `scryptSync` to derive a deterministic key + IV. Variations across
+  trials in scrypt-call shape (one call vs two), salt representation
+  (string vs `Buffer.alloc`), and `verifyToken` defence (`===` vs
+  `timingSafeEqual`, with or without try/catch). All three preserved the
+  helper's stated determinism contract.
+
+- **swap-primitive** (2/5): abandon encryption entirely; replace with
+  `crypto.createHmac('sha256', ...)`. This was **not** in the rubric
+  defined before the trials. It is a real semantic shift (MAC, not
+  encryption) but is arguably more appropriate for opaque session-token
+  signing. Both T003 and T004 used `crypto.timingSafeEqual` with a
+  length check; both produced near-identical diffs.
+
+#### Quality observations
+
+- Every trial **kept the Node bump in both `package.json` engines and
+  `ci.yml` setup-node version**. The agent never tried to make CI pass by
+  reverting the Node bump (the rubric's `wrong-but-passing` failure mode).
+- Every trial used `crypto.timingSafeEqual` for `verifyToken` except T001
+  (which used plain `===`).
+- 3/5 dropped the third "rejects wrong passphrase / tampered" test that
+  T001 added (T002 kept it; T003, T004, T005 shipped only 2 tests).
+- The agent never modified files outside the four touched by the inject
+  + ci.yml setup-node line. No scope creep.
+
+#### Honest interpretation
+
+For this single, well-known scenario (Node 22 hard-removed an API the app
+uses), the unguided agent is **highly capable**: 5/5 fixes, no
+wrong-but-passing, no scope creep, all preserved the Node bump. The
+strategy varied (modernize-cipher vs swap-primitive) but never
+unreasonably.
+
+**This is one scenario, N=5.** The result does not generalize to:
+- transitive dependency conflicts (the original framing the predecessor
+  was aiming at; see "Honest meta-finding" in the fixture section for
+  why we couldn't construct one)
+- multi-file failures
+- failures whose root cause is not in the latest commit
+- failures requiring runtime / production context the agent doesn't have
+
+The rubric category `swap-primitive` was added retroactively after
+observing it in T003. Original rubric should be revised before any
+future batch. See `agent_proposed_strategy` in `trials.jsonl` for the
+canonical strategy strings used.
+
+#### Discovered constraints (not findings about the agent)
+
+1. **App tokens cannot assign `copilot-swe-agent`** — the workflow's
+   assignment step had to be removed; assignment is now a manual step.
+   See "Discovered limitation" section above.
+2. **Bot-authored CI runs are gated `action_required` by default**, even
+   with the repo Actions approval policy set to its most permissive
+   "first-time contributors who are new to GitHub" option. Every trial
+   required a `gh run rerun` from the repo owner to actually run CI on
+   the agent's PR. Wallclock figures above include only agent
+   work-time, not the CI-rerun delay.
+3. **Stray dedupe-on-deletion**: when an inject branch is deleted while
+   a CI run is queued (or after policy change releases a queued run),
+   the resulting failure can produce a tracking issue against the
+   deleted branch. Harmless but needs cleanup in the trial procedure.
+
+#### What to do next
+
+- **Add `copilot-instructions.md` guidance** and rerun N=5 in batch 2.
+  Compare outcome and strategy distribution. (Anti-bias rule #2 was
+  followed: batch 1 ran with no guidance.)
+- **Pick a different scenario class** (multi-file root cause; failure
+  in a transitively-imported module; dep with breaking semver bump)
+  and run a fresh N=5. The current scenario is single-file and the
+  agent solved it trivially; harder cases are needed to characterize
+  the agent's edge.
+- **Revise the rubric** to include `swap-primitive` and any other
+  strategies seen in batch 2.
