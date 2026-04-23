@@ -245,4 +245,24 @@ jobs:
           # issue assignment is the ONLY reliable trigger for the cloud agent.
           # PR-assign, PR-comment @-mention, and issue-comment @-mention all
           # failed to start a session in testing.
-          gh issue edit "$ISSUE_NUMBER" --add-assignee "copilot-swe-agent"
+          #
+          # IMPORTANT: do NOT use `gh issue edit --add-assignee` here — it
+          # uses the GraphQL `replaceActorsForAssignable` mutation which an
+          # App installation token cannot authorize for the copilot-swe-agent
+          # bot ("target repository is not writable"). Use the REST endpoint
+          # POST /repos/{owner}/{repo}/issues/{n}/assignees instead, which
+          # accepts the App token with `issues: write`.
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GH_REPO}/issues/${ISSUE_NUMBER}/assignees" \
+            -f "assignees[]=copilot-swe-agent"
+          # Verify the bot actually landed in the assignees list — the REST
+          # endpoint silently ignores assignees the caller can't add.
+          assigned=$(gh api "/repos/${GH_REPO}/issues/${ISSUE_NUMBER}" \
+            --jq '[.assignees[].login] | join(",")')
+          echo "Assignees after add: ${assigned}"
+          echo "${assigned}" | grep -q 'copilot-swe-agent' || {
+            echo "::error::copilot-swe-agent was silently dropped from assignees"
+            exit 1
+          }
