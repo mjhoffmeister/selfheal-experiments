@@ -47,47 +47,62 @@ plausible real-world problem, not a contrived one.
 
 ## Inject scenario
 
-`scripts/inject-dep-conflict.{ps1,sh}` performs three coupled mutations on a
+`scripts/inject-dep-conflict.{ps1,sh}` performs four coupled mutations on a
 fresh branch off `main`:
 
 1. `src/Web/package.json` — bumps `engines.node` from `18.x` to `22.x`.
-2. `.github/workflows/ci.yml` — bumps `setup-node` `node-version` from
+2. `src/Web/package.json` — adds `bcrypt@5.0.1` as a direct dependency.
+   bcrypt 5.0.1 has no prebuilt binaries for Node 22, so `npm ci` falls
+   through to a node-gyp source build that fails.
+3. `.github/workflows/ci.yml` — bumps `setup-node` `node-version` from
    `18.20.4` to `22.11.0`.
-3. `src/Web/.npmrc` — written with `engine-strict=true` so npm treats
-   engines mismatches as install-time errors rather than warnings.
+4. `src/Web/.npmrc` — written with `engine-strict=true` (defence-in-depth;
+   not the primary failure trigger now).
 
-**Honest disclaimer:** at the time of writing, it is **not verified** that the
-above inject actually produces a CI failure with the current dependency set.
-Most modern Node packages declare permissive `engines.node` (e.g. `>=14`),
-which a 22-bump satisfies. If trial 1 produces no failure, that itself is a
-finding — log it as `outcome: error` (infra: inject too weak), then iterate
-on the inject ONCE before resuming trials. Iterating multiple times would
-introduce experimenter bias.
+The script also regenerates `package-lock.json` via `npm install
+--package-lock-only --ignore-scripts` so the lock matches the new
+`package.json` without invoking native postinstall on the local box (which
+would defeat the purpose).
 
-### Alternatives considered for the inject
+### Iteration history
 
-Listed for transparency and for the post-trial-1 fallback decision:
+**v1 (deleted):** bare `engines.node` bump + `engine-strict=true`. Tested
+empirically on 2026-04-23 against PR #1 — CI passed in 13s. Modern packages
+declare permissive `engines.node`, so nothing fired. Documented and
+iterated ONCE per the anti-bias rule (rule #1 forbids per-trial tuning;
+this was a pre-trial infra fix, not tuning between trials).
+
+**v2 (current):** above. Honest about the scenario class drift: this is
+now "native-module install fails after Node major bump" rather than
+"transitive engines conflict". Both are realistic real-world failure
+modes a Node service hits when bumping Node majors; the test of agent
+capability is comparable.
+
+### Alternatives still on the table (not chosen)
+
+If v2 also fails to produce a CI failure, or if results are uninteresting,
+these remain available:
 
 | Variant | Why considered | Why not (yet) chosen |
 |---|---|---|
-| Add `bcrypt@5.0.1` (older native module) | Reliably forces node-gyp on Node 22 (no prebuilt binary) | Native-module install errors are a *direct* dep issue, not a *transitive* engines conflict — drifts from the question. |
 | Pin `eslint@7.x` as a direct dep | Older ESLint has narrower Node support | ESLint isn't a runtime dep of the fixture; would feel transparently bolted-on. |
-| Use npm `overrides` to pin a transitive to an old version | Cleanest "transitive surfaces" story | Hard to pick a transitive whose old version actually breaks on Node 22 without local trial-and-error — would itself bias the inject. |
+| Use npm `overrides` to pin a transitive to an old version | Cleanest "transitive surfaces" story | Hard to pick a transitive whose old version actually breaks on Node 22 without local trial-and-error. |
 | Add a test that uses `crypto.createCipher` (removed in Node 22) | Reliable runtime failure | That's a fixture bug, not a dependency conflict — wrong scenario class. |
-| Keep `engines.node` permissive but add `.npmrc engine-strict=true` + bump CI Node only | Closest to "no warning was an error" reality | Same root issue — without an upper-bounded transitive, nothing fires. |
+| Pin `node-sass@4.x` | Famously Node-version-coupled real-world legacy dep | Same class as bcrypt (native module); pick one. |
 
 ### Expected agent strategies
 
 The trial log records `agent_proposed_strategy` as one of:
 
-- **overrides** — adds `overrides` in `package.json` to pin a problematic
-  transitive forward to a Node-22-compatible version.
-- **parent-bump** — bumps the offending direct dep to a version whose
-  transitive tree is Node-22-compatible.
-- **patch-package** — uses `patch-package` (or hand-edits `node_modules`) to
-  paper over the conflict.
-- **rollback** — reverts the `engines.node` bump entirely (counts as
-  `wrong-but-passing` per the rubric below — it makes CI green by
+- **bump-bcrypt** — bumps bcrypt to a version with Node-22 prebuilds (the
+  obviously-correct fix; bcrypt 5.1.1+).
+- **swap-bcrypt** — replaces bcrypt with `bcryptjs` (pure-JS, no native
+  build). Reasonable but a wider change.
+- **overrides** — adds `overrides` in `package.json` to pin a transitive
+  forward (less applicable now that the failure is a direct dep, but
+  possible if the agent misreads the failure).
+- **rollback** — reverts the Node bump or removes bcrypt entirely (counts
+  as `wrong-but-passing` per the rubric below — makes CI green by
   abandoning the intended change).
 - **none** — no strategy proposed; PR is empty or doesn't address the issue.
 
