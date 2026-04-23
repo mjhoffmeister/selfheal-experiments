@@ -5,7 +5,7 @@
   "description": "Tiny Express fixture for selfheal-experiments. Intentionally boring.",
   "main": "index.js",
   "engines": {
-    "node": "18.x"
+    "node": "22.x"
   },
   "scripts": {
     "start": "node index.js",
@@ -14,7 +14,8 @@
   "dependencies": {
     "express": "4.19.2",
     "dotenv": "16.4.5",
-    "pino": "8.21.0"
+    "pino": "8.21.0",
+    "bcrypt": "5.0.1"
   },
   "devDependencies": {
     "jest": "29.7.0",
