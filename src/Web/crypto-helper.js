@@ -14,8 +14,12 @@ function signToken(payload, passphrase) {
 
 function verifyToken(token, payload, passphrase) {
   const expected = signToken(payload, passphrase);
-  return token.length === expected.length &&
-    crypto.timingSafeEqual(Buffer.from(token, 'hex'), Buffer.from(expected, 'hex'));
+  try {
+    return token.length === expected.length &&
+      crypto.timingSafeEqual(Buffer.from(token, 'hex'), Buffer.from(expected, 'hex'));
+  } catch {
+    return false;
+  }
 }
 
 module.exports = { signToken, verifyToken };
