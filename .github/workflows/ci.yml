@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  web:
+    name: web (node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: src/Web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Pin Node + npm versions explicitly. Per /experiments/README.md
+      # reproducibility notes, trial entries record this so a re-run can
+      # reproduce the failure surface.
+      - name: Setup Node
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: '18.20.4'
+          cache: 'npm'
+          cache-dependency-path: src/Web/package-lock.json
+
+      - name: Install (clean)
+        run: npm ci
+
+      - name: Test
+        run: npm test

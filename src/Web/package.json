@@ -1,0 +1,23 @@
+{
+  "name": "selfheal-experiments-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tiny Express fixture for selfheal-experiments. Intentionally boring.",
+  "main": "index.js",
+  "engines": {
+    "node": "18.x"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "jest --ci --colors=false"
+  },
+  "dependencies": {
+    "express": "4.19.2",
+    "dotenv": "16.4.5",
+    "pino": "8.21.0"
+  },
+  "devDependencies": {
+    "jest": "29.7.0",
+    "supertest": "6.3.4"
+  }
+}

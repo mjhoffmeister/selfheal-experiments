@@ -1,0 +1,8 @@
+# Default: let git decide
+* text=auto
+
+# Shell scripts must keep LF line endings (run on Linux runners).
+*.sh text eol=lf
+
+# Lockfiles: treat as text, keep LF for stable diffs.
+package-lock.json text eol=lf

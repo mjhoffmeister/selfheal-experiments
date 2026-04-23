@@ -1,0 +1,231 @@
+# Self-heal responder.
+#
+# Listens for completed CI runs. On failure:
+#   1. classify              — extract failed job name, last 50 log lines, dedupe key
+#   2. open-or-update-issue  — render template, dedupe by (workflow, branch, failed_job),
+#                              create issue or comment on existing
+#   3. assign-copilot        — mint App token, assign copilot-swe-agent to the issue
+#
+# Loop-prevention: skip when the upstream run was triggered by the cloud agent itself.
+# Permissions: minimum viable per job. No PATs anywhere.
+#
+# Deliberately omitted (vs predecessor v0-governance-reference):
+#   - transient detection / retry-once
+#   - circuit breaker / attempt labels
+#   - source-PR lookup + PR-comment dispatch path
+# Per /experiments/README.md, only ONE dispatch path (issue assignment) is exercised
+# in this experiment harness because empirical testing showed it is the only
+# reliable trigger for the cloud agent.
+
+name: Self-heal
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions: {}
+
+env:
+  UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+  UPSTREAM_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+  UPSTREAM_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+  UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url }}
+  UPSTREAM_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+  UPSTREAM_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+  UPSTREAM_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+  UPSTREAM_TRIGGERING_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+
+jobs:
+  classify:
+    name: classify failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Fail-fast filter: only failures, never react to our own bot, never react to PRs from forks.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.triggering_actor.login != 'copilot-swe-agent[bot]' &&
+      github.event.workflow_run.triggering_actor.login != 'github-actions[bot]'
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      failed_job_name: ${{ steps.detect.outputs.failed_job_name }}
+      log_tail_b64: ${{ steps.detect.outputs.log_tail_b64 }}
+      dedupe_key: ${{ steps.detect.outputs.dedupe_key }}
+    steps:
+      - name: Inspect failed jobs and logs
+        id: detect
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const crypto = require('crypto');
+            const runId = Number(process.env.UPSTREAM_RUN_ID);
+
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+              per_page: 100,
+            });
+
+            const failed = jobs.find(j => j.conclusion === 'failure');
+            const failedName = failed ? failed.name : 'unknown';
+            core.info(`Failed job: ${failedName}`);
+
+            // Pull logs (zip). Take last ~50 lines of printable text across the bundle.
+            let logTail = '(no log content available)';
+            try {
+              const logsResp = await github.rest.actions.downloadWorkflowRunLogs({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+              });
+              const buf = Buffer.from(logsResp.data);
+              const text = buf.toString('utf8').replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '');
+              const lines = text.split('\n').filter(l => l.trim().length > 0);
+              logTail = lines.slice(-50).join('\n');
+            } catch (err) {
+              core.warning(`Could not download logs: ${err.message}`);
+            }
+
+            const dedupeRaw = `${process.env.UPSTREAM_WORKFLOW_NAME}|${process.env.UPSTREAM_HEAD_BRANCH}|${failedName}`;
+            const dedupeKey = crypto.createHash('sha1').update(dedupeRaw).digest('hex').slice(0, 12);
+
+            core.setOutput('failed_job_name', failedName);
+            core.setOutput('log_tail_b64', Buffer.from(logTail, 'utf8').toString('base64'));
+            core.setOutput('dedupe_key', dedupeKey);
+
+  open-or-update-issue:
+    name: open or update tracking issue
+    needs: classify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      issue_number: ${{ steps.upsert.outputs.issue_number }}
+    steps:
+      - name: Checkout (need template)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Render issue body from template
+        id: render
+        env:
+          WORKFLOW_NAME: ${{ env.UPSTREAM_WORKFLOW_NAME }}
+          FAILED_JOB_NAME: ${{ needs.classify.outputs.failed_job_name }}
+          HEAD_BRANCH: ${{ env.UPSTREAM_HEAD_BRANCH }}
+          HEAD_SHA: ${{ env.UPSTREAM_HEAD_SHA }}
+          RUN_NUMBER: ${{ env.UPSTREAM_RUN_NUMBER }}
+          RUN_ATTEMPT: ${{ env.UPSTREAM_RUN_ATTEMPT }}
+          RUN_URL: ${{ env.UPSTREAM_RUN_URL }}
+          TRIGGERING_ACTOR: ${{ env.UPSTREAM_TRIGGERING_ACTOR }}
+          DEDUPE_KEY: ${{ needs.classify.outputs.dedupe_key }}
+          LOG_TAIL_B64: ${{ needs.classify.outputs.log_tail_b64 }}
+        run: |
+          set -euo pipefail
+          # Decode log tail safely — never expand vars from log content.
+          # The template uses a ~~~~ fence (4 tildes) so log content containing ``` cannot
+          # break the markdown structure; no further sanitization required.
+          LOG_TAIL="$(printf '%s' "$LOG_TAIL_B64" | base64 -d)"
+          export LOG_TAIL
+
+          # envsubst with an explicit allowlist — never substitute arbitrary $VAR from the log body.
+          ALLOWED='${WORKFLOW_NAME} ${FAILED_JOB_NAME} ${HEAD_BRANCH} ${HEAD_SHA} ${RUN_NUMBER} ${RUN_ATTEMPT} ${RUN_URL} ${TRIGGERING_ACTOR} ${DEDUPE_KEY} ${LOG_TAIL}'
+          envsubst "$ALLOWED" < .github/CI_FAILURE_TEMPLATE.md > /tmp/issue-body.md
+          echo "body_path=/tmp/issue-body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure self-heal label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Idempotent — `--force` updates colour/description if the label already
+          # exists, otherwise creates it. Without this, `gh issue create --label`
+          # fails on a fresh repo with "could not add label: 'self-heal' not found".
+          gh label create self-heal --color 0E8A16 --description "Tracking issue opened by the self-heal responder" --force
+
+      - name: Upsert issue
+        id: upsert
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEDUPE_KEY: ${{ needs.classify.outputs.dedupe_key }}
+          FAILED_JOB_NAME: ${{ needs.classify.outputs.failed_job_name }}
+          HEAD_BRANCH: ${{ env.UPSTREAM_HEAD_BRANCH }}
+          WORKFLOW_NAME: ${{ env.UPSTREAM_WORKFLOW_NAME }}
+          BODY_PATH: ${{ steps.render.outputs.body_path }}
+        run: |
+          set -euo pipefail
+
+          # Embed the dedupe key as a quoted token so GitHub search treats it as a
+          # title substring (NOT as a `key:` qualifier, which would be parsed as an
+          # unknown qualifier and return zero results).
+          DEDUPE_TOKEN="sh-${DEDUPE_KEY}"
+          TITLE="[self-heal] ${WORKFLOW_NAME} failed: ${FAILED_JOB_NAME} on ${HEAD_BRANCH} (${DEDUPE_TOKEN})"
+
+          existing="$(gh issue list \
+            --state open \
+            --label self-heal \
+            --search "\"${DEDUPE_TOKEN}\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -z "$existing" ]; then
+            url="$(gh issue create \
+              --title "$TITLE" \
+              --body-file "$BODY_PATH" \
+              --label self-heal)"
+            num="${url##*/}"
+            echo "issue_number=$num" >> "$GITHUB_OUTPUT"
+          else
+            gh issue comment "$existing" --body-file "$BODY_PATH"
+            echo "issue_number=$existing" >> "$GITHUB_OUTPUT"
+          fi
+
+  assign-copilot:
+    name: assign Copilot cloud agent
+    needs: [classify, open-or-update-issue]
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      # Mint a short-lived (~1h) GitHub App installation token at runtime.
+      # Inputs:
+      #   vars.APP_ID             — public GitHub App ID (a repo/org variable, NOT a secret)
+      #   secrets.APP_PRIVATE_KEY — the App's RSA private key (.pem contents)
+      #
+      # App permissions required:
+      #   - issues: write   (assign agent to tracking issue)
+      #   - metadata: read  (mandatory for any App)
+      #
+      # We DO NOT keep a long-lived fallback secret: installation tokens expire
+      # hourly, so any "stored token" would have to be a PAT, which violates
+      # the no-PATs rule.
+      - name: Mint App installation token
+        id: app_token
+        uses: actions/create-github-app-token@67e27a7eb7db372a1c61a7f9bdab8699e9ee57f7 # v1.11.1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Assign agent to tracking issue
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ needs.open-or-update-issue.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+          # No checkout in this job (it has zero filesystem permissions), so
+          # gh's git-based repo auto-detection fails. GH_REPO tells gh which
+          # repo to act on without needing a working tree.
+          #
+          # The Copilot cloud agent's *display* login is "Copilot" but its
+          # *actual* assignee handle is the bot login "copilot-swe-agent" —
+          # passing "Copilot" to --add-assignee returns "'Copilot' not found".
+          #
+          # Empirical finding (see /memories/selfheal-strategic-learnings.md):
+          # issue assignment is the ONLY reliable trigger for the cloud agent.
+          # PR-assign, PR-comment @-mention, and issue-comment @-mention all
+          # failed to start a session in testing.
+          gh issue edit "$ISSUE_NUMBER" --add-assignee "copilot-swe-agent"
