@@ -13,7 +13,9 @@ function signToken(payload, passphrase) {
 }
 
 function verifyToken(token, payload, passphrase) {
-  return signToken(payload, passphrase) === token;
+  const expected = signToken(payload, passphrase);
+  return token.length === expected.length &&
+    crypto.timingSafeEqual(Buffer.from(token, 'hex'), Buffer.from(expected, 'hex'));
 }
 
 module.exports = { signToken, verifyToken };

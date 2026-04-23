@@ -13,4 +13,9 @@ describe('crypto-helper', () => {
     const token = signToken('user-42', 'shared-secret');
     expect(verifyToken(token, 'user-42', 'shared-secret')).toBe(true);
   });
+
+  test('verifyToken rejects a token with the wrong passphrase', () => {
+    const token = signToken('user-42', 'shared-secret');
+    expect(verifyToken(token, 'user-42', 'wrong-secret')).toBe(false);
+  });
 });
