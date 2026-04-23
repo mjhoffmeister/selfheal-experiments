@@ -205,6 +205,33 @@ decision is whether to introduce a PAT (and document it as a deliberate
 deviation), not how to coax the App token into doing what GitHub
 explicitly prevents.
 
+### Known alternative path: GitHub App user-to-server token
+
+Per [GitHub's docs on assigning issues to Copilot via the API](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-a-pr#assigning-an-issue-to-copilot-via-the-github-api),
+"a personal access token **or a GitHub App user-to-server token**" is
+acceptable. A user-to-server (U2S) token authenticates as a user
+*acting through* the App, and so satisfies the user-identity requirement
+that an installation token does not.
+
+To use one from a workflow you would need to:
+
+1. Configure the App for OAuth user authorization (callback URL, or
+   device flow).
+2. Walk the OAuth/device flow once as a Copilot-subscribed user → store
+   the resulting refresh token as a repo secret.
+3. In the workflow, exchange the refresh token for a fresh ~8h access
+   token at job start, then assign the bot with that token.
+4. Handle refresh-token rotation / re-consent if it ever expires.
+
+**Not adopted for this experiment.** A long-lived refresh token in a
+repo secret has effectively the same blast radius as a PAT (account-
+scoped credential, persistent, one secret away from full impersonation),
+so it doesn't materially honour the no-PATs rule it would be sidestepping.
+The harness cost (OAuth bootstrap + refresh handling) is non-trivial; the
+benefit is automating one `gh issue edit` line per trial. Recorded here
+so a future iteration that genuinely needs unattended issue dispatch
+(e.g. scheduled trial batches) doesn't have to re-derive the option.
+
 ## Trial log schema (`trials.jsonl`)
 
 One JSON object per line; append-only.
