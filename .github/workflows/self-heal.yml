@@ -71,22 +71,39 @@ jobs:
 
             const failed = jobs.find(j => j.conclusion === 'failure');
             const failedName = failed ? failed.name : 'unknown';
-            core.info(`Failed job: ${failedName}`);
+            const failedJobId = failed ? failed.id : null;
+            core.info(`Failed job: ${failedName} (id=${failedJobId})`);
 
-            // Pull logs (zip). Take last ~50 lines of printable text across the bundle.
+            // Pull plain-text logs for the FAILED JOB ONLY. The run-level
+            // downloadWorkflowRunLogs endpoint returns a zip archive; trying
+            // to treat that as text yields zip header bytes (PK\x03\x04, file
+            // names) instead of log content. The per-job endpoint returns
+            // plain text directly.
             let logTail = '(no log content available)';
-            try {
-              const logsResp = await github.rest.actions.downloadWorkflowRunLogs({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                run_id: runId,
-              });
-              const buf = Buffer.from(logsResp.data);
-              const text = buf.toString('utf8').replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '');
-              const lines = text.split('\n').filter(l => l.trim().length > 0);
-              logTail = lines.slice(-50).join('\n');
-            } catch (err) {
-              core.warning(`Could not download logs: ${err.message}`);
+            if (failedJobId) {
+              try {
+                const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  job_id: failedJobId,
+                });
+                // Response data is plain text. Strip ANSI colour codes and
+                // GitHub Actions timestamp prefix (`2024-01-01T00:00:00.0000000Z `)
+                // so the agent sees readable lines.
+                const raw = typeof logsResp.data === 'string'
+                  ? logsResp.data
+                  : Buffer.from(logsResp.data).toString('utf8');
+                const ansi = /\x1b\[[0-9;]*[A-Za-z]/g;
+                const ts = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s?/;
+                const lines = raw
+                  .replace(ansi, '')
+                  .split('\n')
+                  .map(l => l.replace(ts, ''))
+                  .filter(l => l.trim().length > 0);
+                logTail = lines.slice(-50).join('\n');
+              } catch (err) {
+                core.warning(`Could not download job logs: ${err.message}`);
+              }
             }
 
             const dedupeRaw = `${process.env.UPSTREAM_WORKFLOW_NAME}|${process.env.UPSTREAM_HEAD_BRANCH}|${failedName}`;
