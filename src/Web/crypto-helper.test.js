@@ -13,4 +13,9 @@ describe('crypto-helper', () => {
     const token = signToken('user-42', 'shared-secret');
     expect(verifyToken(token, 'user-42', 'shared-secret')).toBe(true);
   });
+
+  test('verifyToken rejects a tampered token', () => {
+    const token = signToken('user-42', 'shared-secret');
+    expect(verifyToken(token, 'user-99', 'shared-secret')).toBe(false);
+  });
 });
