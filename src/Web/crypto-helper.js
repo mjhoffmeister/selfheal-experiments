@@ -1,29 +1,15 @@
 'use strict';
 
-// Sign an opaque session token.
+// Sign an opaque session token using HMAC-SHA256.
 //
-// Uses crypto.createCipheriv with a key derived from the passphrase via
-// scrypt (fixed salt) and a fixed IV, so the output is deterministic for the
-// same payload + passphrase pair. crypto.createCipher was hard-removed in
-// Node 22 (deprecated since Node 10); this is the modern replacement.
+// crypto.createCipher was hard-removed in Node 22 (deprecated since Node 10).
+// HMAC is the appropriate primitive for token signing: it is deterministic
+// for the same payload + passphrase, and is designed for authentication rather
+// than encryption.
 const crypto = require('crypto');
 
-const ALGO = 'aes-192-cbc';
-const KEY_LEN = 24; // 192 bits
-const IV_LEN = 16;  // AES block size
-const SALT = 'selfheal-fixed-salt';
-const FIXED_IV = Buffer.alloc(IV_LEN, 0);
-
-function deriveKey(passphrase) {
-  return crypto.scryptSync(passphrase, SALT, KEY_LEN);
-}
-
 function signToken(payload, passphrase) {
-  const key = deriveKey(passphrase);
-  const cipher = crypto.createCipheriv(ALGO, key, FIXED_IV);
-  let out = cipher.update(payload, 'utf8', 'hex');
-  out += cipher.final('hex');
-  return out;
+  return crypto.createHmac('sha256', passphrase).update(payload).digest('hex');
 }
 
 function verifyToken(token, payload, passphrase) {
