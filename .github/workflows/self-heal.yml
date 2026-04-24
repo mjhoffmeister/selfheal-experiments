@@ -49,10 +49,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Fail-fast filter: only failures, never react to our own bot, never react to PRs from forks.
+    # `demo/*` branches are handled by `demo-self-heal.yml` (customer-facing
+    # walkthrough); skip here so the experiment harness behaviour stays
+    # byte-stable across trial batches.
     if: >-
       github.event.workflow_run.conclusion == 'failure' &&
       github.event.workflow_run.triggering_actor.login != 'copilot-swe-agent[bot]' &&
-      github.event.workflow_run.triggering_actor.login != 'github-actions[bot]'
+      github.event.workflow_run.triggering_actor.login != 'github-actions[bot]' &&
+      !startsWith(github.event.workflow_run.head_branch, 'demo/')
     permissions:
       actions: read
       contents: read
