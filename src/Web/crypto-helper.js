@@ -1,17 +1,21 @@
 'use strict';
 
-// Sign an opaque session token. Implementation predates Node 22.
-//
-// Note: crypto.createCipher is a legacy API. It derives a key from the
-// passphrase via OpenSSL's EVP_BytesToKey, which is not considered secure
-// for new code. Kept here for backward-compatibility with tokens issued by
-// the previous version of this service.
 const crypto = require('crypto');
 
 const ALGO = 'aes-192-cbc';
+const KEY_LEN = 24; // aes-192 requires a 24-byte key
+const IV_LEN = 16;  // AES CBC requires a 16-byte IV
+const SALT = 'selfheal-experiments-static-salt';
+
+// Derive a deterministic key and IV from the passphrase using scrypt.
+function deriveKeyAndIv(passphrase) {
+  const derived = crypto.scryptSync(passphrase, SALT, KEY_LEN + IV_LEN);
+  return { key: derived.subarray(0, KEY_LEN), iv: derived.subarray(KEY_LEN) };
+}
 
 function signToken(payload, passphrase) {
-  const cipher = crypto.createCipher(ALGO, passphrase);
+  const { key, iv } = deriveKeyAndIv(passphrase);
+  const cipher = crypto.createCipheriv(ALGO, key, iv);
   let out = cipher.update(payload, 'utf8', 'hex');
   out += cipher.final('hex');
   return out;
