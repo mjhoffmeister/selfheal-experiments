@@ -8,6 +8,11 @@ The fixture is small and deliberately uninteresting; the interesting bits live i
 rationale) and [experiments/trials.jsonl](experiments/trials.jsonl) (append-only
 trial log).
 
+See also [.github/skills/selfheal-demo/](.github/skills/selfheal-demo/) for
+a customer-facing walkthrough of the @-mention-PR-author handoff pattern
+(built on the same fixture; isolated from the experiment harness so trial
+data stays byte-stable). Packaged as a VS Code skill so it's chat-invokable.
+
 ## Predecessor
 
 Architectural patterns (issue-assignment dispatch, App-token minting, SHA-pinned
@@ -29,14 +34,17 @@ actions, per-job `permissions:` blocks, dedupe key) are carried from
 
 ```
 .github/
-  CI_FAILURE_TEMPLATE.md    Issue body template (envsubst-rendered)
-  copilot-instructions.md   Per-repo agent guardrails (filled in X6)
+  CI_FAILURE_TEMPLATE.md       Issue body template (envsubst-rendered)
+  DEMO_CI_FAILURE_TEMPLATE.md  Issue body template for the demo flow
+  copilot-instructions.md      Per-repo agent guardrails (filled in X6)
   workflows/
-    ci.yml                  Builds + tests src/Web/
-    self-heal.yml           classify → open-or-update-issue → assign-copilot
-src/Web/                    Node fixture (Express + jest)
-scripts/                    Inject scripts (PowerShell + bash)
-experiments/                Trial procedure + log
+    ci.yml                     Builds + tests src/Web/
+    self-heal.yml              Experiment responder (skips demo/* branches)
+    demo-self-heal.yml         Demo responder (scoped to demo/* branches)
+src/Web/                       Node fixture (Express + jest)
+scripts/                       Experiment inject scripts (PowerShell + bash)
+experiments/                   Trial procedure + log
+.github/skills/selfheal-demo/  Customer-facing walkthrough (run/reset + SKILL.md)
 ```
 
 ## External setup (one-time, not scripted)
